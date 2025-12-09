@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yerel Otobüs Rezervasyon Sistemi</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Inter font kullanımı */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+        }
+        .seat {
+            width: 48px;
+            height: 48px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 4px;
+            cursor: pointer;
+            border-radius: 8px;
+            transition: all 0.2s ease;
+            font-size: 10px;
+            line-height: 1.2;
+            text-align: center;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            user-select: none;
+        }
+        .seat-available {
+            background-color: #a7f3d0; /* Yeşil */
+            border: 2px solid #34d399;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        .seat-reserved {
+            background-color: #fca5a5; /* Kırmızı */
+            border: 2px solid #ef4444;
+            color: #7f1d1d;
+            cursor: pointer;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1) inset;
+        }
+        .seat-selected {
+            background-color: #93c5fd; /* Mavi */
+            border: 3px solid #3b82f6;
+            transform: scale(1.05);
+            box-shadow: 0 6px 8px rgba(59, 130, 246, 0.3);
+        }
+        .seat-label {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            font-size: 8px;
+            font-weight: bold;
+            color: #1f2937;
+            opacity: 0.7;
+        }
+        .aisle {
+            width: 48px;
+            height: 48px;
+            margin: 4px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #6b7280;
+            font-size: 10px;
+            flex-shrink: 0;
+        }
+        /* Şoför kabini stilizasyonu */
+        #driver-cabin {
+            background-color: #374151;
+            color: white;
+            padding: 8px;
+            border-radius: 8px;
+            font-weight: bold;
+            margin-bottom: 16px;
+            text-align: center;
+            width: 100px;
+        }
+    </style>
+    <script>
+        // --- YEREL UYGULAMA MANTIĞI ---
+
+        let busData = {};
+        let currentBusId = 'okul_onu';
+        let selectedSeat = null;
+
+        // HTML Elementleri (Başlangıçta null atanır, DOMContentLoaded içinde atanır)
+        let seatMapContainer = null;
+        let reservationPanel = null;
+        let reservationForm = null;
+        let passengerNameInput = null;
+        let saveButton = null;
+        let secondaryActionButton = null;
+        let currentSelectionDisplay = null;
+        let messageBox = null;
+        
+        // Önceki Gemini API butonlarının yer tutucuları
+        let personaButton = null;
+        let summaryButton = null;
+        let personaResult = null;
+        let summaryResult = null;
+
+        /**
+         * Otobüs Koltuklarının Kimliklerini Oluşturma (57 Kişilik)
+         */
+        const generateSeatIds = () => {
+            const seats = {};
+            const standardLetters = ['A', 'B', 'C', 'D'];
+            const backRowLetters = ['A', 'B', 'C', 'D', 'E'];
+
+            for (let row = 1; row <= 13; row++) {
+                standardLetters.forEach(letter => {
+                    const id = `${row}${letter}`;
+                    seats[id] = null;
+                });
+            }
+
+            backRowLetters.forEach(letter => {
+                const id = `14${letter}`;
+                seats[id] = null;
+            });
+            
+            return seats;
+        };
+        
+        // Yerel Depolamadan Veri Yükleme
+        const loadBusData = () => {
+            const defaultData = {
+                'okul_onu': { name: 'Okul Önü', seats: generateSeatIds() },
+                'kale_center': { name: 'Kale Center', seats: generateSeatIds() }
+            };
+
+            try {
+                const savedData = localStorage.getItem('localBusReservations');
+                if (savedData) {
+                    busData = JSON.parse(savedData);
+                    // Yeni otobüs eklenirse veya koltuk düzeni değişirse varsayılan ile birleştir
+                    busData = { ...defaultData, ...busData };
+                } else {
+                    busData = defaultData;
+                    saveBusData(); // İlk kez çalışıyorsa varsayılanı kaydet
+                }
+            } catch (e) {
+                console.error("Local Storage'dan veri yüklenirken hata:", e);
+                busData = defaultData;
+            }
+        };
+
+        // Yerel Depolamaya Veri Kaydetme
+        const saveBusData = () => {
+            try {
+                localStorage.setItem('localBusReservations', JSON.stringify(busData));
+            } catch (e) {
+                console.error("Local Storage'a veri kaydedilirken hata:", e);
+                showMessage('Hata: Tarayıcınızın yerel depolama alanı dolu veya devre dışı. Veriler kaydedilemiyor.', 'error');
+            }
+        };
+
+        // Otobüs Haritasını Çizme
+        const renderSeatMap = () => {
+            if (!busData[currentBusId] || !seatMapContainer) return;
+
+            const seats = busData[currentBusId].seats;
+            seatMapContainer.innerHTML = '';
+            
+            selectedSeat = null;
+            reservationPanel.classList.add('hidden');
+            
+            // Başlık Güncelleme
+            document.getElementById('current-bus-title').textContent = busData[currentBusId].name;
+
+            // Şoför kabini
+            const driverCabin = document.createElement('div');
+            driverCabin.id = 'driver-cabin';
+            driverCabin.textContent = 'ŞOFÖR';
+            seatMapContainer.appendChild(driverCabin);
+
+            const gridContainer = document.createElement('div');
+            gridContainer.className = 'flex flex-col items-center w-full';
+            seatMapContainer.appendChild(gridContainer);
+            
+            // 1'den 13'e kadar normal sıralar (2+koridor+2)
+            for (let rowNum = 1; rowNum <= 13; rowNum++) {
+                const rowDiv = document.createElement('div');
+                rowDiv.className = 'flex justify-center w-full my-1';
+
+                const standardRowSeats = [`${rowNum}A`, `${rowNum}B`, `${rowNum}C`, `${rowNum}D`];
+                
+                // Sağ taraftaki koltuklar (D, C)
+                standardRowSeats.slice(2).reverse().forEach(seatId => { 
+                    rowDiv.appendChild(createSeatElement(seatId, seats[seatId]));
+                });
+
+                // Koridor
+                const aisleDiv = document.createElement('div');
+                aisleDiv.className = 'aisle';
+                aisleDiv.textContent = `${rowNum}. Sıra`;
+                rowDiv.appendChild(aisleDiv);
+                
+                // Sol taraftaki koltuklar (B, A)
+                standardRowSeats.slice(0, 2).reverse().forEach(seatId => { 
+                    rowDiv.appendChild(createSeatElement(seatId, seats[seatId]));
+                });
+
+                gridContainer.appendChild(rowDiv);
+            }
+            
+            // 14. sıra (Arka 5'li sofa, koridorsuz)
+            const backRowDiv = document.createElement('div');
+            backRowDiv.className = 'flex justify-center w-full my-1 pt-4 border-t-2 border-dashed border-gray-300';
+            
+            const backRowSeats = ['14A', '14B', '14C', '14D', '14E'];
+
+            // 5 koltuğu yan yana, koridorsuz çiz
+            backRowSeats.forEach(seatId => {
+                backRowDiv.appendChild(createSeatElement(seatId, seats[seatId]));
+            });
+
+            // Arka sıra etiketi
+            const backRowLabel = document.createElement('div');
+            backRowLabel.className = 'w-full text-center text-sm font-semibold text-gray-700 mt-2';
+            backRowLabel.textContent = "14. Sıra (Arka 5'li Sofa)"; 
+            gridContainer.appendChild(backRowLabel);
+
+            gridContainer.appendChild(backRowDiv);
+        };
+
+        // Tek bir koltuk elementi oluşturma
+        const createSeatElement = (seatId, passenger) => {
+            const isReserved = !!passenger;
+            const seatDiv = document.createElement('div');
+            // seat-selected sınıfı atanmadan önce, selectedSeat değişkeni kontrol edilmelidir.
+            const isSelected = selectedSeat === seatId;
+            seatDiv.className = `seat relative ${isReserved ? 'seat-reserved' : 'seat-available'} ${isSelected ? 'seat-selected' : ''}`;
+            seatDiv.dataset.seatId = seatId;
+            
+            const displayPassenger = isReserved ? passenger : 'BOŞ';
+
+            seatDiv.innerHTML = `
+                <span class="seat-label">${seatId}</span>
+                <span class="truncate w-full block">${displayPassenger}</span>
+            `;
+
+            // Tıklama olayını ekle
+            seatDiv.addEventListener('click', () => handleSeatClick(seatId, passenger));
+           
+            if (isReserved) {
+                seatDiv.title = `${passenger} tarafından rezerve edildi. Güncellemek veya iptal etmek için tıklayın.`;
+            } else {
+                 seatDiv.title = `Boş koltuk. Rezerve etmek için tıklayın.`;
+            }
+
+            return seatDiv;
+        };
+
+        // Koltuk Tıklama İşleyici
+        const handleSeatClick = (seatId, passenger) => {
+            if (!reservationPanel || !currentSelectionDisplay || !passengerNameInput || !saveButton || !secondaryActionButton) return;
+            
+            // Önceki seçimi kaldır
+            document.querySelectorAll('.seat-selected').forEach(s => s.classList.remove('seat-selected'));
+            
+            if (selectedSeat === seatId) {
+                // Aynı koltuğa tekrar tıklandı, seçimi kaldır ve paneli gizle
+                selectedSeat = null;
+                reservationPanel.classList.add('hidden');
+                currentSelectionDisplay.textContent = 'Koltuk Seçilmedi';
+            } else {
+                // Yeni koltuk seçildi
+                selectedSeat = seatId;
+                const seatElement = document.querySelector(`[data-seat-id="${seatId}"]`);
+                if (seatElement) {
+                    seatElement.classList.add('seat-selected');
+                }
+                
+                reservationPanel.classList.remove('hidden');
+                currentSelectionDisplay.textContent = `${busData[currentBusId].name} - Koltuk ${seatId}`;
+                
+                const isReserved = !!passenger;
+
+                if (isReserved) {
+                    // Dolu koltuk: Güncelle/İptal et modu
+                    passengerNameInput.value = passenger; 
+                    
+                    saveButton.textContent = 'Rezervasyonu Güncelle';
+                    saveButton.classList.remove('bg-blue-500');
+                    saveButton.classList.add('bg-green-600', 'hover:bg-green-700');
+                    saveButton.dataset.action = 'update';
+
+                    secondaryActionButton.textContent = 'Rezervasyonu İptal Et';
+                    secondaryActionButton.classList.remove('bg-indigo-200');
+                    secondaryActionButton.classList.add('bg-red-500', 'text-white', 'hover:bg-red-600');
+                    secondaryActionButton.dataset.action = 'cancel';
+
+                } else {
+                    // Boş koltuk: Rezerve et modu
+                    passengerNameInput.value = '';
+                    
+                    saveButton.textContent = 'Kaydet';
+                    saveButton.classList.remove('bg-green-600', 'hover:bg-green-700');
+                    saveButton.classList.add('bg-blue-500', 'hover:bg-blue-600');
+                    saveButton.dataset.action = 'reserve';
+                    
+                    secondaryActionButton.textContent = 'Paneli Kapat';
+                    secondaryActionButton.classList.remove('bg-red-500', 'text-white', 'hover:bg-red-600');
+                    secondaryActionButton.classList.add('bg-indigo-200', 'text-indigo-700', 'hover:bg-indigo-300');
+                    secondaryActionButton.dataset.action = 'close';
+                }
+                passengerNameInput.focus();
+            }
+        };
+
+        // Rezervasyon Kaydetme/Güncelleme İşleyicisi
+        const handleReservation = (e) => {
+            e.preventDefault();
+            if (!selectedSeat) return;
+
+            const action = saveButton.dataset.action;
+            const seatId = selectedSeat;
+            let passengerName = passengerNameInput.value.trim();
+            
+            if (!passengerName && action !== 'cancel') {
+                showMessage('Lütfen adınızı ve soyadınızı girin.', 'warning');
+                return;
+            }
+
+            try {
+                if (action === 'reserve') {
+                    if (busData[currentBusId].seats[seatId] !== null) {
+                        showMessage('Hata: Bu koltuk başkası tarafından rezerve edilmiş (yerel veriyi kontrol edin).', 'error');
+                        return;
+                    }
+                    busData[currentBusId].seats[seatId] = passengerName;
+                    showMessage(`${busData[currentBusId].name} otobüsünde ${seatId} numaralı koltuğu başarıyla rezerve ettiniz.`, 'success');
+
+                } else if (action === 'update') {
+                    busData[currentBusId].seats[seatId] = passengerName;
+                    showMessage(`${seatId} numaralı koltuğun rezervasyonu başarıyla güncellendi: ${passengerName}.`, 'success');
+                }
+                
+                // Veriyi kaydet ve haritayı yeniden çiz
+                saveBusData();
+                renderSeatMap();
+                
+                // İşlem başarılı, paneli gizle
+                selectedSeat = null;
+                reservationPanel.classList.add('hidden');
+                
+            } catch (error) {
+                showMessage(`İşlem sırasında bir hata oluştu: ${error.message}`, 'error');
+                console.error("Reservation/Update Error:", error);
+            }
+        };
+
+        // Otobüs Seçimi
+        const selectBus = (busId) => {
+            currentBusId = busId;
+            document.querySelectorAll('.bus-button').forEach(btn => {
+                btn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                btn.classList.add('bg-indigo-400', 'hover:bg-indigo-500');
+            });
+            const selectedBtn = document.getElementById(`btn-${busId}`);
+            if (selectedBtn) {
+                selectedBtn.classList.remove('bg-indigo-400', 'hover:bg-indigo-500');
+                selectedBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
+            }
+            
+            renderSeatMap(); 
+        };
+        
+        // Genel mesaj kutusu işlevi
+        const showMessage = (message, type = 'info') => {
+            if (!messageBox) return; // Eleman atanmamışsa çık
+
+            messageBox.textContent = message;
+            messageBox.className = 'p-3 rounded-lg text-center font-semibold mt-4';
+            
+            switch (type) {
+                case 'success':
+                    messageBox.classList.add('bg-green-100', 'text-green-800');
+                    break;
+                case 'error':
+                    messageBox.classList.add('bg-red-100', 'text-red-800');
+                    break;
+                case 'warning':
+                    messageBox.classList.add('bg-yellow-100', 'text-yellow-800');
+                    break;
+                case 'info':
+                default:
+                    messageBox.classList.add('bg-blue-100', 'text-blue-800');
+                    break;
+            }
+            messageBox.classList.remove('hidden');
+            // 5 saniye sonra mesajı gizle
+            setTimeout(() => {
+                messageBox.classList.add('hidden');
+            }, 5000);
+        };
+
+        // Uygulama Başlangıcı
+        document.addEventListener('DOMContentLoaded', () => {
+            // 1. HTML Elementlerine Atamaları Yap
+            seatMapContainer = document.getElementById('seat-map-container');
+            reservationPanel = document.getElementById('reservation-panel');
+            reservationForm = document.getElementById('reservation-form');
+            passengerNameInput = document.getElementById('passenger-name');
+            saveButton = document.getElementById('save-reservation');
+            secondaryActionButton = document.getElementById('secondary-action');
+            currentSelectionDisplay = document.getElementById('current-selection');
+            messageBox = document.getElementById('message-box');
+            
+            // Kullanılmayan Gemini alanlarını gizle/kaldır
+            const personaArea = document.getElementById('persona-area');
+            if (personaArea) personaArea.style.display = 'none';
+
+            const userIdDisplay = document.getElementById('user-id-display');
+            if (userIdDisplay) userIdDisplay.remove();
+
+            // 2. Event Listener Atamalarını Yap (Artık elementler mevcut)
+            reservationForm.addEventListener('submit', handleReservation);
+            
+            secondaryActionButton.addEventListener('click', () => {
+                const action = secondaryActionButton.dataset.action;
+                
+                if (action === 'cancel') {
+                    if (!selectedSeat || !busData[currentBusId].seats[selectedSeat]) return;
+                    
+                    const seatId = selectedSeat;
+                    
+                    try {
+                        busData[currentBusId].seats[seatId] = null; // Rezervasyonu iptal et
+                        saveBusData();
+                        renderSeatMap();
+                        showMessage(`${busData[currentBusId].name} otobüsünde ${seatId} numaralı rezervasyon iptal edildi.`, 'success');
+
+                    } catch (error) {
+                        showMessage(`İptal sırasında bir hata oluştu: ${error.message}`, 'error');
+                        console.error("Cancellation Error:", error);
+                    }
+                }
+                
+                // Paneli kapat ve seçimi sıfırla (Kapat veya İptal sonrası)
+                selectedSeat = null;
+                reservationPanel.classList.add('hidden');
+                document.querySelectorAll('.seat-selected').forEach(s => s.classList.remove('seat-selected'));
+                currentSelectionDisplay.textContent = 'Koltuk Seçilmedi';
+            });
+
+            // Otobüs seçim olaylarını tanımla
+            document.getElementById('btn-okul_onu').addEventListener('click', () => selectBus('okul_onu'));
+            document.getElementById('btn-kale_center').addEventListener('click', () => selectBus('kale_center'));
+            
+            // 3. Verileri yükle ve başlangıçta ilk otobüsü seç
+            loadBusData();
+            selectBus('okul_onu');
+        });
+        
+    </script>
+</head>
+<body class="p-4 md:p-8">
+
+    <div class="max-w-4xl mx-auto bg-white p-6 rounded-xl shadow-2xl">
+        <h1 class="text-3xl font-extrabold text-gray-900 mb-6 border-b pb-3 text-center">Yerel Otobüs Koltuk Rezervasyonu</h1>
+        
+        <!-- Otobüs Seçimi -->
+        <div id="bus-selection-container" class="flex flex-col sm:flex-row justify-center space-y-4 sm:space-y-0 sm:space-x-4 mb-8">
+            <button id="btn-okul_onu" class="bus-button px-6 py-3 rounded-lg text-white font-bold transition duration-150 bg-indigo-600 hover:bg-indigo-700 shadow-lg">
+                1. Otobüs: Okul Önü
+            </button>
+            <button id="btn-kale_center" class="bus-button px-6 py-3 rounded-lg text-white font-bold transition duration-150 bg-indigo-400 hover:bg-indigo-500 shadow-lg">
+                2. Otobüs: Kale Center
+            </button>
+        </div>
+        
+        <!-- Mesaj Kutusu -->
+        <div id="message-box" class="hidden"></div>
+
+        <div class="flex flex-col lg:flex-row lg:space-x-6">
+            <!-- Koltuk Haritası Bölümü -->
+            <div class="lg:w-2/3 p-4 bg-gray-50 rounded-xl shadow-inner border border-gray-200 mb-6 lg:mb-0 flex flex-col items-center">
+                <h2 class="text-xl font-semibold mb-4 text-gray-800">Koltuk Düzeni (<span id="current-bus-title">Otobüs Yükleniyor...</span>)</h2>
+                
+                <!-- Not: Gemini ile ilgili butonlar kaldırıldı -->
+                <div id="seat-map-container" class="flex flex-col items-center p-4 bg-white rounded-xl shadow-lg border">
+                    <!-- Koltuklar buraya JS ile yüklenecek -->
+                    <div class="text-gray-500">Koltuk haritası yükleniyor...</div>
+                </div>
+                <div class="flex flex-wrap justify-center mt-4 text-sm space-x-4">
+                    <div class="flex items-center">
+                        <span class="inline-block w-4 h-4 rounded-full bg-a7f3d0 border-2 border-green-400 mr-2"></span>
+                        Boş (Rezerve Et)
+                    </div>
+                    <div class="flex items-center">
+                        <span class="inline-block w-4 h-4 rounded-full bg-fca5a5 border-2 border-red-500 mr-2"></span>
+                        Dolu (Güncelle/İptal Et)
+                    </div>
+                    <div class="flex items-center">
+                        <span class="inline-block w-4 h-4 rounded-full bg-93c5fd border-3 border-blue-500 mr-2"></span>
+                        Seçili Koltuk
+                    </div>
+                </div>
+            </div>
+
+            <!-- Rezervasyon Paneli -->
+            <div id="reservation-panel" class="lg:w-1/3 p-4 bg-indigo-50 rounded-xl shadow-xl border-t-4 border-indigo-500 hidden sticky top-4 h-fit">
+                <h2 class="text-xl font-semibold mb-4 text-indigo-800">Rezervasyon İşlemi</h2>
+                
+                <p class="mb-4 text-sm font-medium text-indigo-700">Seçiminiz: <span id="current-selection" class="font-bold">Koltuk Seçilmedi</span></p>
+
+                <form id="reservation-form">
+                    <div class="mb-4">
+                        <label for="passenger-name" class="block text-sm font-medium text-indigo-700">Adınız Soyadınız:</label>
+                        <input type="text" id="passenger-name" required 
+                               class="mt-1 block w-full px-3 py-2 border border-indigo-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                               placeholder="Adınızı ve soyadınızı girin">
+                    </div>
+                    
+                    <div class="flex flex-col space-y-2 mb-4">
+                        <!-- Birincil Eylem Butonu (Kaydet/Güncelle) -->
+                        <button type="submit" id="save-reservation" 
+                                class="px-4 py-2 rounded-lg text-white font-semibold transition duration-150 shadow-md bg-blue-500 hover:bg-blue-600"
+                                data-action="reserve">
+                            Kaydet
+                        </button>
+                        <!-- İkincil Eylem Butonu (Kapat/İptal Et) -->
+                        <button type="button" id="secondary-action"
+                                class="px-4 py-2 rounded-lg text-indigo-700 bg-indigo-200 hover:bg-indigo-300 font-semibold transition duration-150 shadow-md"
+                                data-action="close">
+                            Paneli Kapat
+                        </button>
+                    </div>
+
+                    <!-- Gemini ile ilgili alanlar kaldırıldı -->
+                    <div id="persona-area">
+                        <button type="button" id="generate-persona" class="hidden"></button>
+                        <div id="persona-result"></div>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+    </div>
+
+</body>
+</html>
